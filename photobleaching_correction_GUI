@@ -1,0 +1,287 @@
+function photobleaching_correction_GUI
+    % Constants for UI layout
+    FIGURE_POSITION = [100, 100, 1200, 650]; % Figure position
+    BUTTON_WIDTH = 100; % Button width
+    BUTTON_HEIGHT = 30; % Button height
+    SLIDER_HEIGHT = 20; % Slider height
+    AXES_POSITION = [0.1, 0.1, 0.5, 0.6]; % Image display axes position
+    GRAPH_POSITION = [0.65, 0.1, 0.3, 0.6]; % Graph axes position
+
+    % Create Figure
+    fig = figure('Name', 'Photobleaching Correction GUI', 'NumberTitle', 'off', ...
+                 'Position', FIGURE_POSITION);
+
+    % Store handles to GUI objects
+    gui_data = struct();
+
+    % UI Controls
+    gui_data.handles.load_button = uicontrol('Style', 'pushbutton', 'String', 'Load Image', ...
+                                        'Position', [20, 600, BUTTON_WIDTH, BUTTON_HEIGHT], ...
+                                        'Callback', @(src, event) load_image(gcf, guidata(gcf)));
+    gui_data.handles.roi_button = uicontrol('Style', 'pushbutton', 'String', 'Select Background ROI', ...
+                                       'Position', [140, 600, 150, BUTTON_HEIGHT], ...
+                                       'Callback', @(src, event) select_background_roi(gcf, guidata(gcf)));
+    gui_data.handles.preview_button = uicontrol('Style', 'pushbutton', 'String', 'Preview Background Subtraction', ...
+                                           'Position', [310, 600, 180, BUTTON_HEIGHT], ...
+                                           'Callback', @(src, event) preview_background_subtraction(gcf, guidata(gcf)));
+    gui_data.handles.correct_button = uicontrol('Style', 'pushbutton', 'String', 'Apply Correction', ...
+                                           'Position', [510, 600, 150, BUTTON_HEIGHT], ...
+                                           'Callback', @(src, event) apply_correction(gcf, guidata(gcf)));
+    gui_data.handles.save_button = uicontrol('Style', 'pushbutton', 'String', 'Save Image', ...
+                                        'Position', [680, 600, BUTTON_WIDTH, BUTTON_HEIGHT], ...
+                                        'Callback', @(src, event) save_image(gcf, guidata(gcf)));
+
+    % Slider for Frames
+    gui_data.handles.frame_slider = uicontrol('Style', 'slider', 'Min', 1, 'Max', 2, 'Value', 1, ...
+                                         'Position', [20, 550, 860, SLIDER_HEIGHT], ...
+                                         'Callback', @(src, event) update_frame(gcf, guidata(gcf)));
+    addlistener(gui_data.handles.frame_slider, 'ContinuousValueChange', @(src, event) update_frame(gcf, guidata(gcf)));
+
+    % Dropdown for Correction Method
+    gui_data.handles.method_menu = uicontrol('Style', 'popupmenu', 'String', {'Single Exp', 'Double Exp'}, ...
+                                        'Position', [800, 570, 120, BUTTON_HEIGHT]);
+
+    % Axes for Image Display
+    gui_data.handles.ax = axes('Units', 'normalized', 'Position', AXES_POSITION);
+
+    % Axes for Intensity Graph
+    gui_data.handles.graph_ax = axes('Units', 'normalized', 'Position', GRAPH_POSITION);
+    title(gui_data.handles.graph_ax, 'Intensity Before and After Correction');
+    xlabel(gui_data.handles.graph_ax, 'Frame Number');
+    ylabel(gui_data.handles.graph_ax, 'Mean Intensity');
+    hold(gui_data.handles.graph_ax, 'on');
+
+    % Initialize data
+    gui_data.original_image = [];
+    gui_data.corrected_image = [];
+    gui_data.background_intensity = [];
+    gui_data.bg_subtracted_image = [];
+    gui_data.current_frame = 1;
+    gui_data.num_frames = 0;
+    gui_data.mean_intensity_before = [];
+    gui_data.mean_intensity_after = [];
+
+    % Store the combined struct
+    guidata(fig, gui_data); % Ensure gui_data is available to callbacks
+end
+
+%% Nested Functions for Callbacks
+
+function load_image(fig, gui_data)
+    try
+        % Prompt user to select a multi-frame TIFF file
+        [file, path] = uigetfile({'*.tif;*.tiff'}, 'Select Multi-frame TIFF');
+        if file == 0, return; end % User canceled
+
+        % Load the image stack
+        gui_data.original_image = load_multi_frame_tiff(fullfile(path, file));
+        gui_data.num_frames = size(gui_data.original_image, 3);
+
+        % Update slider
+        if gui_data.num_frames > 0
+            maxValue = max(gui_data.num_frames, 2); % Ensure Max is at least 2
+            set(gui_data.handles.frame_slider, ...
+                'Min', 1, 'Max', maxValue, ...
+                'Value', 1, 'SliderStep', [1/(maxValue-1), 1/(maxValue-1)]);
+
+            % Update display
+            update_frame(fig, gui_data);
+            guidata(fig, gui_data);
+        else
+            errordlg('The TIFF file contains no frames.');
+        end
+    catch ME
+        errordlg(['Error loading image: ', ME.message]);
+    end
+end
+
+function select_background_roi(fig, gui_data)
+    try
+        if isempty(gui_data.original_image)
+            errordlg('Please load an image first.');
+            return;
+        end
+
+        % Draw ROI and create mask
+        roi = drawrectangle(gui_data.handles.ax);
+        mask = createMask(roi);
+
+        % Calculate background intensity for each frame
+        gui_data.background_intensity = zeros(1, gui_data.num_frames);
+        for k = 1:gui_data.num_frames
+            frame_data = gui_data.original_image(:,:,k);
+            roi_values = frame_data(mask);
+            if ~isempty(roi_values) && any(roi_values > 0)
+                gui_data.background_intensity(k) = mean(roi_values(roi_values > 0));
+            else
+                gui_data.background_intensity(k) = 0; % Handle empty ROI
+            end
+        end
+
+        guidata(fig, gui_data);
+    catch ME
+        errordlg(['Error selecting ROI: ', ME.message]);
+    end
+end
+
+function preview_background_subtraction(fig, gui_data)
+    try
+        if isempty(gui_data.original_image) || isempty(gui_data.background_intensity)
+            errordlg('Please load an image and select a background ROI first.');
+            return;
+        end
+
+        % Subtract background from each frame
+        gui_data.bg_subtracted_image = zeros(size(gui_data.original_image), 'like', gui_data.original_image);
+        for k = 1:gui_data.num_frames
+            gui_data.bg_subtracted_image(:,:,k) = gui_data.original_image(:,:,k) - gui_data.background_intensity(k);
+        end
+
+        % Update display
+        update_frame(fig, gui_data);
+        guidata(fig, gui_data);
+    catch ME
+        errordlg(['Error during background subtraction: ', ME.message]);
+    end
+end
+
+function apply_correction(fig, gui_data)
+    try
+        if isempty(gui_data.bg_subtracted_image)
+            errordlg('Please perform background subtraction first.');
+            return;
+        end
+
+        % Get selected correction method
+        method = get(gui_data.handles.method_menu, 'Value');
+
+        % Apply correction
+        gui_data.corrected_image = bleach_correction(gui_data.bg_subtracted_image, method);
+
+        % Calculate mean intensity before and after correction
+        gui_data.mean_intensity_before = squeeze(mean(mean(gui_data.bg_subtracted_image, 1), 2));
+        gui_data.mean_intensity_after = squeeze(mean(mean(gui_data.corrected_image, 1), 2));
+
+        % Plot intensity before and after correction
+        plot_intensity(gui_data.handles.graph_ax, gui_data);
+
+        % Update display
+        update_frame(fig, gui_data);
+        guidata(fig, gui_data);
+    catch ME
+        errordlg(['Error during correction: ', ME.message]);
+    end
+end
+
+function save_image(fig, gui_data)
+    try
+        if isempty(gui_data.corrected_image)
+            errordlg('No corrected image to save.');
+            return;
+        end
+
+        % Prompt user for save location
+        [file, path] = uiputfile({'*.tif'}, 'Save Corrected Image');
+        if file == 0, return; end % User canceled
+
+        % Save the corrected image stack
+        save_tiff(fullfile(path, file), gui_data.corrected_image);
+    catch ME
+        errordlg(['Error saving image: ', ME.message]);
+    end
+end
+
+function update_frame(fig, gui_data)
+    try
+        % Get current frame number from slider
+        gui_data.current_frame = round(get(gui_data.handles.frame_slider, 'Value'));
+
+        % Display the appropriate image in the correct axes
+        if ~isempty(gui_data.corrected_image)
+            imshow(gui_data.corrected_image(:,:,gui_data.current_frame), [], 'Parent', gui_data.handles.ax);
+        elseif ~isempty(gui_data.bg_subtracted_image)
+            imshow(gui_data.bg_subtracted_image(:,:,gui_data.current_frame), [], 'Parent', gui_data.handles.ax);
+        else
+            imshow(gui_data.original_image(:,:,gui_data.current_frame), [], 'Parent', gui_data.handles.ax);
+        end
+
+        guidata(fig, gui_data);
+    catch ME
+        errordlg(['Error updating frame: ', ME.message]);
+    end
+end
+
+%% Helper Functions
+
+function img_stack = load_multi_frame_tiff(filename)
+    info = imfinfo(filename);
+    num_frames = numel(info);
+    img_stack = zeros(info(1).Height, info(1).Width, num_frames, 'uint16');
+    for k = 1:num_frames
+        img_stack(:,:,k) = imread(filename, k);
+    end
+end
+
+function corrected_stack = bleach_correction(img_stack, method)
+    % Basic exponential decay correction
+    num_frames = size(img_stack, 3);
+    corrected_stack = zeros(size(img_stack), 'like', img_stack);
+
+    % Fit exponential decay to the mean intensity of each frame
+    mean_intensity = squeeze(mean(mean(img_stack, 1), 2));
+    time = (1:num_frames)';
+    try
+        if method == 1 % Single Exponential
+            model = fit(time, mean_intensity, 'exp1');
+        elseif method == 2 % Double Exponential
+            model = fit(time, mean_intensity, 'exp2');
+        else
+            error('Invalid correction method.');
+        end
+
+        % Apply correction
+        for k = 1:num_frames
+            corrected_stack(:,:,k) = img_stack(:,:,k) / model(k);
+        end
+    catch ME
+        errordlg(['Error during bleach correction: ', ME.message]);
+        corrected_stack = img_stack; % Return the original if correction fails
+    end
+end
+
+function plot_intensity(graph_ax, gui_data)
+    try
+        cla(graph_ax); % Clear previous plot
+
+        % Plot mean intensity before correction
+        plot(graph_ax, 1:gui_data.num_frames, gui_data.mean_intensity_before, 'b', 'DisplayName', 'Before Correction');
+
+        % Plot mean intensity after correction
+        hold(graph_ax, 'on');
+        plot(graph_ax, 1:gui_data.num_frames, gui_data.mean_intensity_after, 'r', 'DisplayName', 'After Correction');
+
+        % Add legend and labels
+        legend(graph_ax, 'show');
+        title(graph_ax, 'Intensity Before and After Correction');
+        xlabel(graph_ax, 'Frame Number');
+        ylabel(graph_ax, 'Mean Intensity');
+        hold(graph_ax, 'off');
+    catch ME
+        errordlg(['Error plotting intensity: ', ME.message]);
+    end
+end
+
+function save_tiff(filename, img_stack)
+    try
+        % Save multi-frame TIFF using imwrite
+        for k = 1:size(img_stack, 3)
+            if k == 1
+                imwrite(img_stack(:,:,k), filename, 'Compression', 'none');
+            else
+                imwrite(img_stack(:,:,k), filename, 'WriteMode', 'append', 'Compression', 'none');
+            end
+        end
+    catch ME
+        errordlg(['Error saving TIFF: ', ME.message]);
+    end
+end
