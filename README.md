@@ -1,3 +1,6 @@
+# photobleaching-correction-GUI
+# Author : Muralidharan Mani 
+# Affiliation : University of Wisconsin-Madison
 The practical steps of using this photobleaching correction GUI in MATLAB.
 
 1. Save the Code as a MATLAB Function:
